@@ -1,0 +1,111 @@
+import csv
+import os
+import time
+from pathlib import Path
+
+from datetime import datetime
+from learned_index import insert_data_in_chunks, DynamicLearnedIndex
+from utils import load_LAION_hdf5_embeddings, create_parser, get_data_path_for, load_LAION_ground_truth, \
+    load_agnews_mxbai_dataset, recall_at_k
+
+import logging
+from logging.handlers import RotatingFileHandler
+
+NOW = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+
+def setup_logging(log_file="learned_index.log"):
+    os.makedirs("logs", exist_ok=True)
+    log_path = os.path.join("logs", log_file)
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S"
+    ))
+
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=10_000_000,
+        backupCount=5
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+
+    logger.handlers = []
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+
+    logger.info("Logging initialized")
+    logger.info(f"Log file: {log_path}")
+
+
+if __name__ == "__main__":
+    setup_logging(f"learned_index_{NOW}.log")
+    parser = create_parser()
+    args = vars(parser.parse_args())
+
+    k = args["k_neighbors"]
+
+    match args["dataset"]:
+        case "laion2B":
+            dataset = load_LAION_hdf5_embeddings(get_data_path_for(args["dataset_filename"]))
+            queries = load_LAION_hdf5_embeddings(get_data_path_for(args["queries_filename"]))
+            ground_truth = load_LAION_ground_truth(get_data_path_for(args["ground_truth"]), k)
+        case "agnews-mxbai":
+            dataset, queries, ground_truth = load_agnews_mxbai_dataset(get_data_path_for(args["dataset_filename"]), k)
+        case _:
+            raise ValueError("Unknown dataset")
+
+    logging.info(f"[DATA] Dataset: {dataset.shape} | Queries: {queries.shape}")
+
+    start = time.time()
+    index = DynamicLearnedIndex(
+        data_dim=dataset.shape[1],
+        init_after_samples=args["init_after_samples"],
+        replay_size=args["replay_memory_size"],
+    )
+    insert_data_in_chunks(index, dataset, chunk_size=args["insert_chunk_size"])
+    buildtime = time.time() - start
+
+    n_probes = range(1, args["n_probe"] + 1)
+    distance_metric = args["distance_metric"]
+    results = {}
+
+    for n_probe in n_probes:
+        start = time.time()
+        D_pred, I_pred = index.search(queries, k=k, n_probe=n_probe, distance_metric=distance_metric)
+        searchtime = time.time() - start
+
+        logging.info(f"[EVAL] Calculating recall for n_probe={n_probe}")
+        recall = recall_at_k(ground_truth, I_pred, k)
+
+        results[n_probe] = searchtime, recall
+
+    columns = [
+        "algo",
+        "nprobe",
+        "buildtime",
+        "querytime",
+        "recall",
+    ]
+
+    with Path.open(args["csv_file"], mode="w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=columns)
+        writer.writeheader()
+        for nprobe in results:
+            d = {}
+            searchtime, recall = results[nprobe]
+            d["algo"] = "dli"
+            d["nprobe"] = nprobe
+            d["buildtime"] = buildtime
+            d["querytime"] = searchtime
+            d["recall"] = recall
+            writer.writerow(d)

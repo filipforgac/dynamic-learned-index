@@ -1,0 +1,31 @@
+import h5py
+
+from argparse import ArgumentParser
+from utils import get_data_path_for
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument("--dataset", choices=["laion2B"], default="laion2B")
+    parser.add_argument("--dataset-filename", default="laion2B-en-clip768v2-n=300K.h5", type=str)
+    parser.add_argument("--queries-filename", default="public-queries-2024-laion2B-en-clip768v2-n=10k.h5", type=str)
+    parser.add_argument("--ground-truth", default="gold-standard-dbsize=300K--public-queries-2024-laion2B-en-clip768v2-n=10k.h5", type=str)
+    parser.add_argument("--distance-metric", choices=["inner-product"], default="inner-product", type=str)
+    args = vars(parser.parse_args())
+
+    with h5py.File(get_data_path_for(args["dataset_filename"]), "r") as f:
+        train = f["emb"][:]
+        dimension = train.shape[1]
+
+    with h5py.File(get_data_path_for(args["queries_filename"]), "r") as f:
+        test = f["emb"][:]
+
+    with h5py.File(get_data_path_for(args["ground_truth"]), "r") as f:
+        gt = f["knns"][:]
+
+    output_filename = f"{args['dataset']}-{dimension}-{args['distance_metric']}.hd5f"
+
+    with h5py.File(get_data_path_for(output_filename), "w") as f:
+        f.create_dataset("train", data=train)
+        f.create_dataset("test", data=test)
+        f.create_dataset("neighbors", data=gt)
