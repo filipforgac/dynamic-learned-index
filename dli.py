@@ -42,6 +42,7 @@ class DLI:
 
         self._pending_split_X: list[Tensor] = []
         self._pending_split_y: list[Tensor] = []
+        self._pending_split_ids: list[int] = []
 
     def _run_kmeans(self, k: int, X: Tensor) -> Tensor:
         X_np = X.detach().cpu().numpy().astype(np.float32)
@@ -166,7 +167,8 @@ class DLI:
 
         new_bid = max(self._buckets.keys()) + 1
         new_bucket = Bucket(self._data_dim)
-        new_bucket.insert(X[smaller_idx].cpu(), [ids[i] for i in smaller_idx.tolist()])
+        split_ids = [int(ids[i]) for i in smaller_idx.tolist()]
+        new_bucket.insert(X[smaller_idx].cpu(), split_ids)
         self._buckets[new_bid] = new_bucket
         logger.debug(
             f"[SPLIT] Created new bucket {new_bid} "
@@ -183,6 +185,7 @@ class DLI:
             dtype=torch.long,
             device=self._device
         ))
+        self._pending_split_ids.extend(split_ids)
 
         return new_bid
 
@@ -215,7 +218,6 @@ class DLI:
 
         train_X.extend(self._pending_split_X)
         train_y.extend(self._pending_split_y)
-        self._pending_split_X, self._pending_split_y = [], []
 
         X_train = torch.cat(train_X)
         y_train = torch.cat(train_y)
@@ -224,18 +226,20 @@ class DLI:
         loader = DataLoader(DLIDataset(X_train, y_train), batch_size=256, shuffle=True)
         self._train_model(loader)
 
+    # NOTE: insert() is NOT thread-safe.
     def insert(self, vectors: Tensor) -> None:
         if vectors.dim() == 1:
             vectors = vectors.unsqueeze(0)
 
         vectors = vectors.to(self._device)
         n_data = vectors.shape[0]
+        new_ids = list(range(self._auto_id, self._auto_id + n_data))
         data_dim = vectors.shape[1]
         assert data_dim == self._data_dim, "Inserted data dimension doesn't match indexed dimension"
 
         if not self._initialized:
             self._init_vectors.append(vectors)
-            self._init_ids.extend(range(self._auto_id, self._auto_id + n_data))
+            self._init_ids.extend(new_ids)
             self._auto_id += n_data
 
             if sum(v.shape[0] for v in self._init_vectors) >= self._init_after_samples:
@@ -245,14 +249,14 @@ class DLI:
 
         with torch.no_grad():
             probs = self._model.predict_probabilities(vectors)
-        _, bucket_ids = torch.max(probs, dim=1)
+        _, predicted_bucket_ids = torch.max(probs, dim=1)
 
         per_bucket_vectors = defaultdict(list)
         per_bucket_ids = defaultdict(list)
 
         for i in range(n_data):
-            vid = self._auto_id + i
-            bid = int(bucket_ids[i])
+            vid = new_ids[i]
+            bid = int(predicted_bucket_ids[i])
             per_bucket_vectors[bid].append(vectors[i].cpu())
             per_bucket_ids[bid].append(vid)
 
@@ -261,8 +265,13 @@ class DLI:
         self._auto_id += n_data
 
         new_buckets = self._maybe_split_buckets()
+        was_not_split_mask = [vid not in self._pending_split_ids for vid in new_ids]
+        X_inserted_not_split = vectors[was_not_split_mask]
+        not_split_predicted_bucket_ids = [int(b) for was_not_split, b in zip(was_not_split_mask, predicted_bucket_ids) if was_not_split]
+
         self._refresh_replay(exclude_buckets=new_buckets)
-        self._retrain(vectors, [int(b) for b in bucket_ids])
+        self._retrain(X_inserted_not_split, not_split_predicted_bucket_ids)  # vectors in the newly created buckets will be trained from pending splits
+        self._pending_split_X, self._pending_split_y, self._pending_split_ids = [], [], []
 
     def _visit_buckets(
         self,
@@ -331,7 +340,7 @@ class DLI:
             probs = self._model.predict_probabilities(queries.to(self._device))
 
         n_probe = min(n_probe, len(self._buckets))
-        _, predicted_buckets = torch.topk(probs, n_probe, dim=1)
+        _, predicted_bucket_ids = torch.topk(probs, n_probe, dim=1)
 
         n_queries = len(queries_np)
         D = np.empty((n_queries, k), dtype=np.float32)
@@ -344,7 +353,7 @@ class DLI:
             results = executor.map(
                 lambda q: self._visit_buckets(
                     k,
-                    predicted_buckets[q].cpu().tolist(),
+                    predicted_bucket_ids[q].cpu().tolist(),
                     torch.from_numpy(queries_np[q:q + 1]),
                     q,
                     distance_metric,
