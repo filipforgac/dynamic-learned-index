@@ -43,5 +43,7 @@ class MLP(Module):
         self.layers[-1] = new_classifier
 
     def predict_probabilities(self, inputs: Tensor) -> Tensor:
-        logits = self.forward(inputs)
+        self.eval()
+        with torch.no_grad():
+            logits = self.forward(inputs)
         return F.softmax(logits, dim=-1)
