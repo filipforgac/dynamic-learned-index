@@ -226,8 +226,8 @@ class DLI:
         loader = DataLoader(DLIDataset(X_train, y_train), batch_size=256, shuffle=True)
         self._train_model(loader)
 
-    # NOTE: insert() IS NOT thread-safe and must not be executed concurrently.
     def insert(self, vectors: Tensor) -> None:
+        """NOTE: insert(...) IS NOT thread-safe and must not be executed concurrently."""
         if vectors.dim() == 1:
             vectors = vectors.unsqueeze(0)
 
@@ -325,8 +325,8 @@ class DLI:
 
         return D, I
 
-    # NOTE: search() IS thread-safe and can be executed concurrently.
     def search(self, queries: Tensor, k: int, n_probe: int, distance_metric: str) -> tuple[np.ndarray, np.ndarray]:
+        """NOTE: search(...) IS thread-safe and can be executed concurrently."""
         if queries.dim() == 1:
             queries = queries.unsqueeze(0)
 
