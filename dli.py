@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from data import DLIDataset
 from model import MLP
-from bucket import Bucket
+from bucket import Bucket, search_vectors
 from utils import herd_from, get_device
 
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +22,7 @@ SEED = 42
 MIN_BUCKET_SIZE_FOR_SPLIT = 2 * 40  # Based on faiss kmeans which require roughly cluster_size * 40 samples
 
 
-class DynamicLearnedIndex:
+class DLI:
     def __init__(self, data_dim, init_after_samples, replay_size):
         self._device = get_device()
         self._data_dim = data_dim
@@ -89,7 +89,7 @@ class DynamicLearnedIndex:
             f"(total={self._replay_size}, buckets={n_buckets}, per_bucket={replay_per_bucket})"
         )
 
-        def is_eligible(_id):
+        def is_eligible(_id) -> bool:
             return _id in self._buckets and _id not in exclude_buckets
 
         for bid in filter(is_eligible, self._buckets.keys()):
@@ -107,8 +107,8 @@ class DynamicLearnedIndex:
         pct = len(self._replay_vectors) / self._replay_size
         logger.info(f"[REPLAY] Final replay amount: {len(self._replay_vectors)} ({pct:.1%})")
 
-    def _initialize(self):
-        X = torch.cat(self._init_vectors, dim=0).to(self._device)
+    def _initialize(self) -> None:
+        X = torch.cat(self._init_vectors).to(self._device)
         n_data = X.shape[0]
         n_buckets = max(2, int(math.sqrt(n_data)))
 
@@ -125,10 +125,10 @@ class DynamicLearnedIndex:
                 continue
 
             vecs = X[idxs]
-            bid = [self._init_ids[i] for i in idxs.tolist()]
+            bids = [self._init_ids[i] for i in idxs.tolist()]
 
             bucket = Bucket(self._data_dim)
-            bucket.insert(vecs, bid)
+            bucket.insert(vecs, bids)
             self._buckets[b] = bucket
 
         self._initialized = True
@@ -177,7 +177,7 @@ class DynamicLearnedIndex:
         self._model.expand_to(num_classes)
         logger.debug(f"[MODEL] Expanded classifier to {num_classes} buckets")
 
-        self._pending_split_X.append(torch.cat([X[larger_idx], X[smaller_idx]], dim=0))
+        self._pending_split_X.append(torch.cat([X[larger_idx], X[smaller_idx]]))
         self._pending_split_y.append(torch.tensor(
             [largest_bid] * len(larger_idx) + [new_bid] * len(smaller_idx),
             dtype=torch.long,
@@ -186,7 +186,7 @@ class DynamicLearnedIndex:
 
         return new_bid
 
-    def _split_buckets(self):
+    def _maybe_split_buckets(self) -> list[int]:
         num_buckets = len(self._buckets)
         max_splits = max(1, math.ceil(math.log2(num_buckets)))
         logger.info(f"[SPLIT] Splits allowed this batch: {max_splits}")
@@ -200,7 +200,7 @@ class DynamicLearnedIndex:
 
         return new_bucket_ids
 
-    def _retrain(self, X_inserted: Tensor, predicted_bucket_ids: list[int]):
+    def _retrain(self, X_inserted: Tensor, predicted_bucket_ids: list[int]) -> None:
         train_X = []
         train_y = []
 
@@ -217,19 +217,21 @@ class DynamicLearnedIndex:
         train_y.extend(self._pending_split_y)
         self._pending_split_X, self._pending_split_y = [], []
 
-        X_train = torch.cat(train_X, dim=0)
-        y_train = torch.cat(train_y, dim=0)
+        X_train = torch.cat(train_X)
+        y_train = torch.cat(train_y)
 
         logger.info(f"[TRAIN] Retraining on {len(X_train)} samples")
         loader = DataLoader(DLIDataset(X_train, y_train), batch_size=256, shuffle=True)
         self._train_model(loader)
 
-    def insert(self, vectors: Tensor):
+    def insert(self, vectors: Tensor) -> None:
         if vectors.dim() == 1:
             vectors = vectors.unsqueeze(0)
 
         vectors = vectors.to(self._device)
         n_data = vectors.shape[0]
+        data_dim = vectors.shape[1]
+        assert data_dim == self._data_dim, "Inserted data dimension doesn't match indexed dimension"
 
         if not self._initialized:
             self._init_vectors.append(vectors)
@@ -243,7 +245,7 @@ class DynamicLearnedIndex:
 
         with torch.no_grad():
             probs = self._model.predict_probabilities(vectors)
-        max_probs, bucket_ids = torch.max(probs, dim=1)
+        _, bucket_ids = torch.max(probs, dim=1)
 
         per_bucket_vectors = defaultdict(list)
         per_bucket_ids = defaultdict(list)
@@ -258,11 +260,18 @@ class DynamicLearnedIndex:
             self._buckets[bid].insert(torch.stack(vecs), per_bucket_ids[bid])
         self._auto_id += n_data
 
-        new_buckets = self._split_buckets()
+        new_buckets = self._maybe_split_buckets()
         self._refresh_replay(exclude_buckets=new_buckets)
         self._retrain(vectors, [int(b) for b in bucket_ids])
 
-    def _visit_buckets(self, k: int, predicted_buckets, query: Tensor, qid: int, distance_metric: str):
+    def _visit_buckets(
+        self,
+        k: int,
+        predicted_buckets,
+        query: Tensor,
+        qid: int,
+        distance_metric: str,
+    ) -> tuple[Tensor, Tensor, int]:
         n_buckets = len(predicted_buckets)
         D = torch.empty((n_buckets * k,), dtype=torch.float32)
         I = torch.empty((n_buckets * k,), dtype=torch.int32)
@@ -276,17 +285,53 @@ class DynamicLearnedIndex:
         D_top, idx_top = torch.topk(D, k, largest=False)
         return D_top, I[idx_top], qid
 
-    def search(self, queries: Tensor, k: int, n_probe: int, distance_metric: str):
+    def _search_init_vectors(self, queries: np.ndarray, k: int, distance_metric: str) -> tuple[np.ndarray, np.ndarray]:
+        assert self._init_vectors, "No vectors to search"
+
+        n_queries = len(queries)
+        D = np.empty((n_queries, k), dtype=np.float32)
+        I = np.empty((n_queries, k), dtype=np.int32)
+
+        vectors_np = np.array(self._init_vectors)
+        ids_np = np.array(self._init_ids)
+
+        with ThreadPoolExecutor(max_workers=9) as executor:
+            results = executor.map(
+                lambda q: (
+                    search_vectors(
+                        vectors_np,
+                        ids_np,
+                        torch.from_numpy(queries[q:q + 1]),
+                        k,
+                        distance_metric,
+                    ),
+                    q,
+                ),
+                range(n_queries),
+            )
+
+            for dists, ids, qid in tqdm(results, total=n_queries):
+                D[qid] = dists.numpy()
+                I[qid] = ids.numpy()
+
+        return D, I
+
+    def search(self, queries: Tensor, k: int, n_probe: int, distance_metric: str) -> tuple[np.ndarray, np.ndarray]:
         if queries.dim() == 1:
             queries = queries.unsqueeze(0)
+
+        data_dim = queries.shape[1]
+        assert data_dim == self._data_dim, "Queries dimension doesn't match indexed dimension"
+
+        queries_np = queries.cpu().numpy().astype(np.float32)
+        if not self._initialized:
+            return self._search_init_vectors(queries_np, k, distance_metric)
 
         with torch.no_grad():
             probs = self._model.predict_probabilities(queries.to(self._device))
 
         n_probe = min(n_probe, len(self._buckets))
         _, predicted_buckets = torch.topk(probs, n_probe, dim=1)
-
-        queries_np = queries.cpu().numpy().astype(np.float32)
 
         n_queries = len(queries_np)
         D = np.empty((n_queries, k), dtype=np.float32)
@@ -314,7 +359,7 @@ class DynamicLearnedIndex:
         return D, I
 
 
-def insert_data_in_chunks(index: DynamicLearnedIndex, data: Tensor, chunk_size: int):
+def insert_data_in_chunks(index: DLI, data: Tensor, chunk_size: int) -> None:
     data_size = data.shape[0]
     logger.info(f"[INSERT] Inserting in chunks of {chunk_size} (total {data_size})")
 

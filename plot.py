@@ -9,11 +9,13 @@ def plot_recall_vs_n_probe(csv_path: Path, title: str) -> None:
     plt.figure(figsize=(10, 6))
     for algo, group in df.groupby('algo'):
         plt.plot(group['nprobe'], group['recall'], label=algo, marker='o')
+    plt.gca().set_facecolor("#f0f0f0")  # Light grey background
+    plt.grid(color="#ffffff", linestyle="-", linewidth=1.5)  # White grid lines
     plt.xlabel('Probe')
     plt.ylabel('Recall')
     plt.title(title)
     plt.ylim(bottom=0)
-    plt.legend(title='Algorithm')
+    plt.legend(title='Learned Index')
     plt.grid(True)
     plt.tight_layout()
     plt.show()

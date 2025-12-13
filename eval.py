@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from datetime import datetime
-from learned_index import insert_data_in_chunks, DynamicLearnedIndex
+from dli import insert_data_in_chunks, DLI
 from utils import load_LAION_hdf5_embeddings, create_parser, get_data_path_for, load_LAION_ground_truth, \
     load_agnews_mxbai_dataset, recall_at_k
 
@@ -67,7 +67,7 @@ if __name__ == "__main__":
     logging.info(f"[DATA] Dataset: {dataset.shape} | Queries: {queries.shape}")
 
     start = time.time()
-    index = DynamicLearnedIndex(
+    index = DLI(
         data_dim=dataset.shape[1],
         init_after_samples=args["init_after_samples"],
         replay_size=args["replay_memory_size"],
