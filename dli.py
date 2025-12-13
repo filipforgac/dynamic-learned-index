@@ -247,8 +247,7 @@ class DLI:
 
             return
 
-        with torch.no_grad():
-            probs = self._model.predict_probabilities(vectors)
+        probs = self._model.predict_probabilities(vectors)
         _, predicted_bucket_ids = torch.max(probs, dim=1)
 
         per_bucket_vectors = defaultdict(list)
@@ -337,9 +336,7 @@ class DLI:
         if not self._initialized:
             return self._search_init_vectors(queries_np, k, distance_metric)
 
-        with torch.no_grad():
-            probs = self._model.predict_probabilities(queries.to(self._device))
-
+        probs = self._model.predict_probabilities(queries.to(self._device))
         n_probe = min(n_probe, len(self._buckets))
         _, predicted_bucket_ids = torch.topk(probs, n_probe, dim=1)
 
