@@ -23,7 +23,7 @@ MIN_BUCKET_SIZE_FOR_SPLIT = 2 * 40  # Based on faiss kmeans which require roughl
 
 
 class DLI:
-    def __init__(self, data_dim, init_after_samples, replay_size):
+    def __init__(self, data_dim: int, init_after_samples: int, replay_size: int, split_after_inserts: int):
         self._device = get_device()
         self._data_dim = data_dim
         self._model: MLP | None = None
@@ -33,6 +33,8 @@ class DLI:
 
         self._init_after_samples = init_after_samples
         self._replay_size = replay_size
+        self._split_after_inserts = split_after_inserts
+        self._inserts_since_last_split = 0
 
         self._init_vectors: list[Tensor] = []
         self._init_ids: list[int] = []
@@ -44,6 +46,7 @@ class DLI:
         self._pending_split_y: list[Tensor] = []
         self._pending_split_ids: list[int] = []
 
+    # Inspired by https://github.com/Coda-Research-Group/LearnedMetricIndex/tree/paper-sisap24-indexing-challenge
     def _run_kmeans(self, k: int, X: Tensor) -> Tensor:
         X_np = X.detach().cpu().numpy().astype(np.float32)
         km = faiss.Kmeans(
@@ -195,11 +198,17 @@ class DLI:
         logger.info(f"[SPLIT] Splits allowed this batch: {max_splits}")
 
         new_bucket_ids = []
+        did_split = False
+
         for _ in range(max_splits):
             new_bid = self._maybe_split_bucket()
             if new_bid is None:
                 break
+            did_split = True
             new_bucket_ids.append(new_bid)
+
+        if did_split:
+            self._inserts_since_last_split = 0
 
         return new_bucket_ids
 
@@ -207,8 +216,9 @@ class DLI:
         train_X = []
         train_y = []
 
-        train_X.append(X_inserted)
-        train_y.append(torch.tensor(predicted_bucket_ids, dtype=torch.long, device=self._device))
+        if X_inserted.shape[0] > 0:  # A safeguard in case all inserted samples ended in new buckets
+            train_X.append(X_inserted)
+            train_y.append(torch.tensor(predicted_bucket_ids, dtype=torch.long, device=self._device))
 
         if self._replay_vectors:
             X_rep = torch.stack(self._replay_vectors).to(self._device)
@@ -261,16 +271,29 @@ class DLI:
 
         for bid, vecs in per_bucket_vectors.items():
             self._buckets[bid].insert(torch.stack(vecs), per_bucket_ids[bid])
+
         self._auto_id += n_data
+        self._inserts_since_last_split += n_data
 
-        new_buckets = self._maybe_split_buckets()
-        was_not_split_mask = [vid not in self._pending_split_ids for vid in new_ids]
-        X_inserted_not_split = vectors[was_not_split_mask]
-        not_split_predicted_bucket_ids = [int(b) for was_not_split, b in zip(was_not_split_mask, predicted_bucket_ids) if was_not_split]
+        if self._inserts_since_last_split >= self._split_after_inserts:
+            new_buckets = self._maybe_split_buckets()
+        else:
+            logger.debug(
+                f"[INSERT] Split deferred after batch insert "
+                f"(batch_size={n_data}, "
+                f"inserts_since_last_split={self._inserts_since_last_split}, "
+                f"threshold={self._split_after_inserts})"
+            )
+            new_buckets = []
 
-        self._refresh_replay(exclude_buckets=new_buckets)
-        self._retrain(X_inserted_not_split, not_split_predicted_bucket_ids)  # vectors in the newly created buckets will be trained from pending splits
-        self._pending_split_X, self._pending_split_y, self._pending_split_ids = [], [], []
+        if new_buckets:
+            was_not_split_mask = [vid not in self._pending_split_ids for vid in new_ids]
+            X_inserted_not_split = vectors[was_not_split_mask]
+            not_split_predicted_bucket_ids = [int(b) for was_not_split, b in zip(was_not_split_mask, predicted_bucket_ids) if was_not_split]
+
+            self._refresh_replay(exclude_buckets=new_buckets)
+            self._retrain(X_inserted_not_split, not_split_predicted_bucket_ids)  # vectors in the newly created buckets will be trained from pending splits
+            self._pending_split_X, self._pending_split_y, self._pending_split_ids = [], [], []
 
     def _visit_buckets(
         self,
@@ -290,7 +313,14 @@ class DLI:
             D[start:start + k] = D_bucket.view(-1)
             I[start:start + k] = I_bucket.view(-1)
 
-        D_top, idx_top = torch.topk(D, k, largest=False)
+        match distance_metric:
+            case "inner-product":
+                D_top, idx_top = torch.topk(D, k, largest=True)
+            case "l2":
+                D_top, idx_top = torch.topk(D, k, largest=False)
+            case _:
+                raise ValueError("Invalid distance metric")
+
         return D_top, I[idx_top], qid
 
     def _search_init_vectors(self, queries: np.ndarray, k: int, distance_metric: str) -> tuple[np.ndarray, np.ndarray]:
@@ -303,6 +333,7 @@ class DLI:
         vectors_np = np.array(self._init_vectors)
         ids_np = np.array(self._init_ids)
 
+        # Inspired by https://github.com/Coda-Research-Group/LearnedMetricIndex/tree/paper-sisap24-indexing-challenge
         with ThreadPoolExecutor(max_workers=9) as executor:
             results = executor.map(
                 lambda q: (
@@ -347,6 +378,7 @@ class DLI:
         torch.set_num_threads(3)
         faiss.omp_set_num_threads(3)
 
+        # Inspired by https://github.com/Coda-Research-Group/LearnedMetricIndex/tree/paper-sisap24-indexing-challenge
         with ThreadPoolExecutor(max_workers=9) as executor:
             results = executor.map(
                 lambda q: self._visit_buckets(

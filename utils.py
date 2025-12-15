@@ -22,13 +22,13 @@ def create_parser() -> ArgumentParser:
     parser.add_argument("--dataset-filename", default="laion2B-en-clip768v2-n=300K.h5", type=str)
     parser.add_argument("--queries-filename", default="public-queries-2024-laion2B-en-clip768v2-n=10k.h5", type=str)
     parser.add_argument("--ground-truth", default="gold-standard-dbsize=300K--public-queries-2024-laion2B-en-clip768v2-n=10k.h5", type=str)
-    parser.add_argument("--distance-metric", choices=["inner-product", "l2"], default="l2", type=str)
+    parser.add_argument("--distance-metric", choices=["inner-product", "l2"], default="inner-product", type=str)
     parser.add_argument("--k-neighbors", default=30, type=int)
     parser.add_argument("--n-probe", default=10, type=int)
-    parser.add_argument("--init-after-samples", default=5_000, type=int)
-    parser.add_argument("--insert-chunk-size", default=25_000, type=int)
-    # parser.add_argument("--confidence-threshold", default=0.4, type=float)
-    parser.add_argument("--replay-memory-size", default=5_000, type=int)
+    parser.add_argument("--init-after-samples", default=25_000, type=int)
+    parser.add_argument("--insert-chunk-size", default=5_000, type=int)
+    parser.add_argument("--replay-memory-size", default=0, type=int)
+    parser.add_argument("--split-after-inserts", default=25_000, type=int)
     parser.add_argument("--csv-file", default="res.csv", type=str)
     return parser
 
@@ -68,6 +68,7 @@ def herd_from(X: Tensor, amount: int) -> list[int]:
     return selected
 
 
+# Inspired by https://github.com/Coda-Research-Group/LearnedMetricIndex/tree/paper-sisap24-indexing-challenge
 def load_LAION_hdf5_embeddings(path: str) -> torch.Tensor:
     logging.info(f"[LOAD] Loading HDF5 embeddings of LAION dataset from: {path}")
 
@@ -80,7 +81,8 @@ def load_LAION_hdf5_embeddings(path: str) -> torch.Tensor:
         return torch.tensor(data, dtype=torch.float32)
 
 
-def load_LAION_ground_truth(gt_path: str, k: int) -> np.ndarray:
+# Inspired by https://github.com/Coda-Research-Group/LearnedMetricIndex/tree/paper-sisap24-indexing-challenge
+def load_LAION_ground_truth(gt_path: str, k: int, should_shift_by_one: bool) -> np.ndarray:
     gt_path = Path(gt_path)
     logger.info(f"[GT] Loading ground truth of LAION dataset from: {gt_path}")
 
@@ -94,7 +96,10 @@ def load_LAION_ground_truth(gt_path: str, k: int) -> np.ndarray:
     if knns.shape[1] < k:
         raise ValueError(f"LAION GT has only {knns.shape[1]} neighbors per query, cannot eval @k={k}")
 
-    I_true = knns[:, :k] - 1
+    I_true = knns[:, :k]
+    if should_shift_by_one:
+        I_true = I_true - 1
+
     return I_true
 
 
@@ -111,6 +116,7 @@ def load_agnews_mxbai_dataset(path: str, k: int) -> tuple[torch.Tensor, torch.Te
         return data, queries, ground_truth[:, :k]
 
 
+# Inspired by https://github.com/Coda-Research-Group/LearnedMetricIndex/tree/paper-sisap24-indexing-challenge
 def recall_at_k(I_true: np.ndarray, I_pred: np.ndarray, k: int) -> float:
     n_I = I_true.shape[0]
 

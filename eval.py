@@ -56,9 +56,12 @@ if __name__ == "__main__":
 
     match args["dataset"]:
         case "laion2B":
-            dataset = load_LAION_hdf5_embeddings(get_data_path_for(args["dataset_filename"]))
+            dataset_filename = args["dataset_filename"]
+            should_shift_by_one = dataset_filename == "laion2B-en-clip768v2-n=300K.h5"
+
+            dataset = load_LAION_hdf5_embeddings(get_data_path_for(dataset_filename))
             queries = load_LAION_hdf5_embeddings(get_data_path_for(args["queries_filename"]))
-            ground_truth = load_LAION_ground_truth(get_data_path_for(args["ground_truth"]), k)
+            ground_truth = load_LAION_ground_truth(get_data_path_for(args["ground_truth"]), k, should_shift_by_one)
         case "agnews-mxbai":
             dataset, queries, ground_truth = load_agnews_mxbai_dataset(get_data_path_for(args["dataset_filename"]), k)
         case _:
@@ -71,6 +74,7 @@ if __name__ == "__main__":
         data_dim=dataset.shape[1],
         init_after_samples=args["init_after_samples"],
         replay_size=args["replay_memory_size"],
+        split_after_inserts=args["split_after_inserts"]
     )
     insert_data_in_chunks(index, dataset, chunk_size=args["insert_chunk_size"])
     buildtime = time.time() - start

@@ -22,5 +22,9 @@ def plot_recall_vs_n_probe(csv_path: Path, title: str) -> None:
 
 
 if __name__ == "__main__":
-    plot_recall_vs_n_probe(Path("res_laion_300k.csv"), title='Recall vs Probe [LAION2B]')
-    plot_recall_vs_n_probe(Path("res_agnews_mxbai.csv"), 'Recall vs Probe [agnews-mxbai]')
+    pass
+    # plot_recall_vs_n_probe(Path("res_laion_300k.csv"), title='Recall@30 vs Probe [LAION2B-300K]')
+    # plot_recall_vs_n_probe(Path("res_laion_1m.csv"), title='Recall@30 vs Probe [LAION2B-1M]')
+    # plot_recall_vs_n_probe(Path("res_agnews_mxbai.csv"), title='Recall@30 vs Probe [agnews-mxbai]')
+    # plot_recall_vs_n_probe(Path("res_laion_300k_5k_chunk.csv"), title='Recall@30 vs Probe [LAION2B-300K], 5K chunk, 5K replay')
+    # plot_recall_vs_n_probe(Path("res_laion_300k_5k_chunk_no_buffer.csv"), title='Recall@30 vs Probe [LAION2B-300K], 5K Chunk, No replay')
