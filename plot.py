@@ -2,7 +2,7 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 
-def plot_recall_vs_n_probe(csv_path: Path, title: str) -> None:
+def plot_recall_vs_n_probe(csv_path: Path, title: str = "Recall vs Probe") -> None:
     df = pd.read_csv(csv_path)
     df = df.sort_values(by=['algo', 'nprobe'])
 
@@ -22,7 +22,7 @@ def plot_recall_vs_n_probe(csv_path: Path, title: str) -> None:
 
 
 if __name__ == "__main__":
-    pass
+    plot_recall_vs_n_probe(Path("res.csv"))
     # plot_recall_vs_n_probe(Path("res_laion_300k.csv"), title='Recall@30 vs Probe [LAION2B-300K]')
     # plot_recall_vs_n_probe(Path("res_laion_1m.csv"), title='Recall@30 vs Probe [LAION2B-1M]')
     # plot_recall_vs_n_probe(Path("res_agnews_mxbai.csv"), title='Recall@30 vs Probe [agnews-mxbai]')

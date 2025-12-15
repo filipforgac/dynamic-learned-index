@@ -29,7 +29,7 @@ def create_parser() -> ArgumentParser:
     parser.add_argument("--insert-chunk-size", default=5_000, type=int)
     parser.add_argument("--replay-memory-size", default=0, type=int)
     parser.add_argument("--split-after-inserts", default=25_000, type=int)
-    parser.add_argument("--csv-file", default="res.csv", type=str)
+    parser.add_argument("--result-csv-file", default="res.csv", type=str)
     return parser
 
 

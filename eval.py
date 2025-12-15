@@ -101,7 +101,7 @@ if __name__ == "__main__":
         "recall",
     ]
 
-    with Path.open(args["csv_file"], mode="w", newline="") as csvfile:
+    with Path.open(args["result_csv_file"], mode="w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=columns)
         writer.writeheader()
         for nprobe in results:
